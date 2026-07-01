@@ -39,23 +39,33 @@ namespace Solitaire.Commands
             }
 
             // Scoring
+            var pos = _card.Position.Value;
             if (_pileSource.IsWaste)
             {
                 if (_pileTarget.IsTableau)
-                    _pointsService.Add(_gameConfig.PointsWasteToTableau);
+                    _pointsService.Add(_gameConfig.PointsWasteToTableau, pos);
                 else if (_pileTarget.IsFoundation)
-                    _pointsService.Add(_gameConfig.PointsWasteToFoundation);
+                    _pointsService.Add(_gameConfig.PointsWasteToFoundation, pos);
             }
             else if (_pileSource.IsTableau && _pileTarget.IsFoundation)
             {
-                _pointsService.Add(_gameConfig.PointsTableauToFoundation);
+                _pointsService.Add(_gameConfig.PointsTableauToFoundation, pos);
             }
             else if (_pileSource.IsFoundation && _pileTarget.IsTableau)
             {
                 _pointsService.Add(_gameConfig.PointsFoundationToTableau);
             }
 
-            _audioService.PlaySfx(Audio.SfxDraw, 0.5f);
+            if (_pileTarget.IsFoundation)
+            {
+                // ponytail: sound based on card count in the pile, not a global counter
+                var soundIndex = System.Math.Min(_pileTarget.Cards.Count, 13);
+                _audioService.PlaySfx($"Foundation{soundIndex}", 0.5f);
+            }
+            else
+            {
+                _audioService.PlaySfx(Audio.SfxDraw, 0.5f);
+            }
 
             // Reveal card below if needed
             var cardBelow = _pileSource.TopCard();
@@ -64,7 +74,7 @@ namespace Solitaire.Commands
             {
                 cardBelow.Flip();
                 _wasTopCardFlipped = true;
-                _pointsService.Add(_gameConfig.PointsTurnOverTableauCard);
+                _pointsService.Add(_gameConfig.PointsTurnOverTableauCard, cardBelow.Position.Value);
             }
         }
 
@@ -100,8 +110,6 @@ namespace Solitaire.Commands
             {
                 _pointsService.Add(-_gameConfig.PointsFoundationToTableau);
             }
-
-            _audioService.PlaySfx(Audio.SfxDraw, 0.5f);
 
             if (_pileTarget.TopCard() == _card)
             {

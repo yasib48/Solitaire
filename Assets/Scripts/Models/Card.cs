@@ -112,6 +112,9 @@ namespace Solitaire.Models
         public class Config
         {
             public float AnimationDuration = 0.5f;
+            public CardTheme Theme;
+
+            // Legacy composite rendering — used when Theme is null
             public Color[] Colors;
             public Sprite[] SuitSprites;
             public Sprite[] TypeSprites;

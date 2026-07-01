@@ -55,8 +55,6 @@ namespace Solitaire.Commands
 
             if (!_options.DrawThree.Value)
                 _pointsService.Set(_points);
-
-            _audioService.PlaySfx(Audio.SfxDraw, 0.5f);
         }
 
         public void Dispose()

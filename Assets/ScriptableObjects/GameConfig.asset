@@ -20,7 +20,8 @@ MonoBehaviour:
     PointsFoundationToTableau: -15
     PointsRecycleWaste: -100
   _card:
-    AnimationDuration: 0.25
+    AnimationDuration: 0.2
+    Theme: {fileID: 11400000, guid: e713b88b69485db409adebe87fa3f10b, type: 2}
     Colors:
     - {r: 0, g: 0, b: 0, a: 1}
     - {r: 0, g: 0, b: 0, a: 1}
@@ -46,7 +47,6 @@ MonoBehaviour:
     - {fileID: 21300000, guid: 1303b1693f3257d45b7ce407bc1fdec7, type: 3}
     - {fileID: 21300000, guid: 38de620951d510c4dbfd223e1e11d2d7, type: 3}
   _audio:
-    MusicVolume: 0.2
     AudioClips:
     - {fileID: 8300000, guid: 11335588942bbd5449bd5e612908f09c, type: 3}
     - {fileID: 8300000, guid: d372c3c1265b3428b93b791dd44035a1, type: 3}
@@ -54,4 +54,16 @@ MonoBehaviour:
     - {fileID: 8300000, guid: d242307039d804d97b0b2cd6a7fe2f4a, type: 3}
     - {fileID: 8300000, guid: 04fcd84edabbc436a95c0c81bc66b2b9, type: 3}
     - {fileID: 8300000, guid: 4f04d64ef7fdf435ba5cc38007e010bc, type: 3}
-    - {fileID: 8300000, guid: b320b8fdf55d9ac4caf2f388b02cf1fc, type: 3}
+    - {fileID: 8300000, guid: 0bee53f03bfefd5418a90364b22cd29f, type: 3}
+    - {fileID: 8300000, guid: a40d9c8edc89bb54b90aa33c95f07531, type: 3}
+    - {fileID: 8300000, guid: 8c8497f54472f964e90717f79d779153, type: 3}
+    - {fileID: 8300000, guid: a83f81c968ab79a4fbc323d1f8787d81, type: 3}
+    - {fileID: 8300000, guid: ce12346ecf14811438357a1859e2b2e0, type: 3}
+    - {fileID: 8300000, guid: 2a3eaad34a681fb40acbdb5eb82def81, type: 3}
+    - {fileID: 8300000, guid: d2e7629cb7a1d0b41903f6734a8b980a, type: 3}
+    - {fileID: 8300000, guid: bbb9c2ea8edf1ce498b70ab0b14bcdc6, type: 3}
+    - {fileID: 8300000, guid: 36855406e3e038d48a66c2d36792f5d2, type: 3}
+    - {fileID: 8300000, guid: 22c15c82615364a40aa2c494dc00ecc6, type: 3}
+    - {fileID: 8300000, guid: 4fcfcad5e0724684e9e61352ab29b073, type: 3}
+    - {fileID: 8300000, guid: 0e66ff3f73426a34a8be1216e58190be, type: 3}
+    - {fileID: 8300000, guid: d756d6e87c12dbb4599f4fe389549135, type: 3}

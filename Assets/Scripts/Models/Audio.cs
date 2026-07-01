@@ -10,9 +10,11 @@ namespace Solitaire.Models
         public const string SfxShuffle = "Shuffle";
         public const string SfxDeal = "Deal";
         public const string SfxDraw = "Draw";
-        public const string SfxHint = "Hint";
+        public const string SfxHint = "hint_button";
         public const string SfxClick = "Click";
         public const string SfxError = "Error";
+        public const string SfxUndo = "undo";
+        public const string SfxMagicWand = "MagicWand";
 
         [Serializable]
         public class Config

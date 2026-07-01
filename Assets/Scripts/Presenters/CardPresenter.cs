@@ -20,7 +20,6 @@ namespace Solitaire.Presenters
             IDropHandler,
             IPointerClickHandler
     {
-        private const float DoubleClickInterval = 0.4f;
         private const float MoveEpsilon = 0.00001f;
         private const int AnimOrder = 100;
 
@@ -40,6 +39,13 @@ namespace Solitaire.Presenters
         [SerializeField]
         private SpriteRenderer _suit2;
 
+        [Header("Foundation Particle")]
+        [SerializeField]
+        private ParticleSystem _foundationVfxPrefab;
+
+        [SerializeField]
+        private Material[] _suitParticleMaterials;
+
         [Inject]
         private readonly Card _card;
 
@@ -52,12 +58,16 @@ namespace Solitaire.Presenters
         [Inject]
         private readonly Game _game;
         private BoxCollider2D _collider;
-        private float _lastClick;
         private IMemoryPool _pool;
         private Transform _transform;
         private Tweener _tweenMove;
 
         private Tweener _tweenScale;
+        private Sequence _tweenShake;
+
+        // The card's authored scale (prefab), restored after a flip so face-up
+        // cards don't snap back to 1 and end up smaller than face-down ones.
+        private Vector3 _baseScale = Vector3.one;
 
         public Card Card => _card;
 
@@ -65,6 +75,7 @@ namespace Solitaire.Presenters
         {
             _collider = GetComponent<BoxCollider2D>();
             _transform = transform;
+            _baseScale = _transform.localScale;
 
             _card.Alpha.Subscribe(UpdateAlpha).AddTo(this);
             _card.Order.Subscribe(UpdateOrder).AddTo(this);
@@ -101,7 +112,7 @@ namespace Solitaire.Presenters
                     .SetEase(Ease.Linear)
                     .SetAutoKill(false)
                     .OnStepComplete(() => Flip(_card.IsFaceUp.Value))
-                    .OnComplete(() => _transform.localScale = Vector3.one);
+                    .OnComplete(() => _transform.localScale = _baseScale);
             else
                 _tweenScale.Restart();
         }
@@ -137,21 +148,39 @@ namespace Solitaire.Presenters
                         .OnComplete(() =>
                         {
                             _card.Order.Value = _card.OrderToRestore;
+                            TryPlayFoundationVfx();
                         });
                 else
                     _tweenMove.ChangeEndValue(position, true).Restart();
             }
         }
 
+        private void TryPlayFoundationVfx()
+        {
+            if (_foundationVfxPrefab == null || _suitParticleMaterials == null)
+                return;
+            if (!_card.IsInPile || !_card.Pile.IsFoundation)
+                return;
+
+            var vfx = Instantiate(_foundationVfxPrefab, _transform.position, Quaternion.identity);
+            var idx = (int)_card.Suit;
+            if (idx < _suitParticleMaterials.Length)
+            {
+                var renderer = vfx.GetComponent<ParticleSystemRenderer>();
+                renderer.material = _suitParticleMaterials[idx];
+            }
+            vfx.Play();
+            Destroy(vfx.gameObject, vfx.main.duration + vfx.main.startLifetime.constantMax);
+        }
+
         private void UpdateOrder(int order)
         {
-            // Update the sorting order of each sprite
             var sortingOrder = order * 10;
             _back.sortingOrder = sortingOrder;
             _front.sortingOrder = sortingOrder;
-            _type.sortingOrder = sortingOrder + 1;
-            _suit1.sortingOrder = sortingOrder + 1;
-            _suit2.sortingOrder = sortingOrder + 1;
+            if (_type != null) _type.sortingOrder = sortingOrder + 1;
+            if (_suit1 != null) _suit1.sortingOrder = sortingOrder + 1;
+            if (_suit2 != null) _suit2.sortingOrder = sortingOrder + 1;
         }
 
         private void UpdateAlpha(float alpha)
@@ -164,26 +193,18 @@ namespace Solitaire.Presenters
             color.a = alpha;
             _front.color = color;
 
-            color = _type.color;
-            color.a = alpha;
-            _type.color = color;
-
-            color = _suit1.color;
-            color.a = alpha;
-            _suit1.color = color;
-
-            color = _suit2.color;
-            color.a = alpha;
-            _suit2.color = color;
+            if (_type != null) { color = _type.color; color.a = alpha; _type.color = color; }
+            if (_suit1 != null) { color = _suit1.color; color.a = alpha; _suit1.color = color; }
+            if (_suit2 != null) { color = _suit2.color; color.a = alpha; _suit2.color = color; }
         }
 
         private void UpdateVisiblity(bool isVisible)
         {
             _back.enabled = isVisible;
             _front.enabled = isVisible;
-            _type.enabled = isVisible;
-            _suit1.enabled = isVisible;
-            _suit2.enabled = isVisible;
+            if (_type != null) _type.enabled = isVisible;
+            if (_suit1 != null) _suit1.enabled = isVisible;
+            if (_suit2 != null) _suit2.enabled = isVisible;
         }
 
         private void UpdateInteractability(bool isInteractable)
@@ -195,22 +216,63 @@ namespace Solitaire.Presenters
         {
             name = $"Card_{_card.Suit}_{_card.Type}";
 
-            // Update suit sprites
-            var spriteSuit = _config.SuitSprites[(int)_card.Suit];
-            _suit1.sprite = spriteSuit;
-            _suit2.sprite = spriteSuit;
+            if (_config.Theme != null)
+            {
+                _front.sprite = _config.Theme.GetCard(_card.Suit, _card.Type);
+                _back.sprite = _config.Theme.Back;
+                if (_type != null) { _type.gameObject.SetActive(false); _type = null; }
+                if (_suit1 != null) { _suit1.gameObject.SetActive(false); _suit1 = null; }
+                if (_suit2 != null) { _suit2.gameObject.SetActive(false); _suit2 = null; }
+            }
+            else
+            {
+                var spriteSuit = _config.SuitSprites[(int)_card.Suit];
+                _suit1.sprite = spriteSuit;
+                _suit2.sprite = spriteSuit;
 
-            // Update type color and sprite
-            var color = _config.Colors[(int)_card.Suit];
-            var spriteType = _config.TypeSprites[(int)_card.Type];
-            _type.sprite = spriteType;
-            _type.color = color;
+                var color = _config.Colors[(int)_card.Suit];
+                var spriteType = _config.TypeSprites[(int)_card.Type];
+                _type.sprite = spriteType;
+                _type.color = color;
+            }
         }
 
         public void Flip(bool isFaceUp)
         {
             _back.gameObject.SetActive(!isFaceUp);
             _front.gameObject.SetActive(isFaceUp);
+        }
+
+        private void Shake()
+        {
+            // Tiny, snappy one-right-one-left wiggle that always snaps back home.
+            if (_tweenShake != null && _tweenShake.IsActive() && _tweenShake.IsPlaying())
+                return;
+
+            var origin = _transform.localPosition;
+            var dx = new Vector3(0.1f, 0f, 0f);
+
+            _tweenShake = DOTween.Sequence();
+            _tweenShake
+                .Append(_transform.DOLocalMove(origin + dx, 0.05f).SetEase(Ease.OutQuad))
+                .Append(_transform.DOLocalMove(origin - dx, 0.05f).SetEase(Ease.InOutQuad))
+                .Append(_transform.DOLocalMove(origin, 0.05f).SetEase(Ease.InQuad))
+                .OnComplete(() => _transform.localPosition = origin);
+        }
+
+        // ponytail: ~30ms light tap, Android only
+        private static void HapticLight()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                using var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
+                using var vibrator = activity.Call<AndroidJavaObject>("getSystemService", "vibrator");
+                vibrator.Call("vibrate", 30L);
+            }
+            catch { }
+#endif
         }
 
         public class Factory : PlaceholderFactory<Card.Suits, Card.Types, CardPresenter> { }
@@ -234,30 +296,68 @@ namespace Solitaire.Presenters
 
         public void OnEndDrag(PointerEventData eventData)
         {
-            if (_card.IsMoveable)
-            {
-                _dndHandler.EndDrag();
-                _card.IsInteractable.Value = true;
-            }
-        }
-
-        public void OnDrop(PointerEventData eventData)
-        {
-            if (eventData == null || eventData.pointerDrag == null)
+            if (!_card.IsMoveable)
                 return;
 
-            if (
-                eventData.pointerDrag.TryGetComponent(out CardPresenter cardPresenter)
-                && _card.Pile.CanAddCard(cardPresenter.Card)
-            )
+            // The drop target is decided by where the dragged card overlaps another
+            // card/pile, not where the finger is. So grabbing a card by its very
+            // corner still works as long as the card itself reaches the target.
+            var target = FindOverlapPile();
+
+            if (target != null)
             {
                 _dndHandler.Drop();
-                _game.MoveCard(cardPresenter.Card, _card.Pile);
+                _game.MoveCard(_card, target);
             }
-            else
+
+            _dndHandler.EndDrag();
+            _card.IsInteractable.Value = true;
+        }
+
+        // Drop is resolved by the dragged card in OnEndDrag, so the pointer-based
+        // drop on a target is intentionally a no-op.
+        public void OnDrop(PointerEventData eventData) { }
+
+        private Pile FindOverlapPile()
+        {
+            var size = Vector2.Scale(_collider.size, transform.lossyScale);
+            var hits = Physics2D.OverlapBoxAll(transform.position, size, 0f);
+
+            Pile best = null;
+            var bestDistance = float.MaxValue;
+
+            for (var i = 0; i < hits.Length; i++)
             {
-                _game.PlayErrorSfx();
+                var hit = hits[i];
+                Pile pile = null;
+
+                if (hit.TryGetComponent(out CardPresenter card))
+                {
+                    if (card.Card.IsDragged)
+                        continue; // ignore the cards we're dragging
+                    pile = card.Card.Pile;
+                }
+                else if (hit.TryGetComponent(out PilePresenter pilePresenter))
+                {
+                    pile = pilePresenter.Pile;
+                }
+
+                if (pile == null || pile == _card.Pile || !pile.CanAddCard(_card))
+                    continue;
+
+                // Among valid overlaps, prefer the closest one to the card's center
+                var distance = (
+                    (Vector2)hit.transform.position - (Vector2)transform.position
+                ).sqrMagnitude;
+
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    best = pile;
+                }
             }
+
+            return best;
         }
 
         public void OnPointerClick(PointerEventData eventData)
@@ -265,19 +365,24 @@ namespace Solitaire.Presenters
             if (eventData == null)
                 return;
 
+            // Single tap: draw from stock. Otherwise any face-up, moveable card
+            // responds — including a card with a valid run on top of it (the whole
+            // run moves). Auto-move to the most sensible pile (foundation first,
+            // then a valid tableau), or shake if it can't go anywhere. Face-down
+            // cards aren't moveable, so they ignore the tap entirely.
             if (_card.IsDrawable)
             {
                 _game.DrawCard();
             }
-            else if (_lastClick + DoubleClickInterval > Time.time)
+            else if (_card.IsMoveable)
             {
-                if (_card.IsMoveable)
-                    _game.MoveCard(_card, null);
-                else
+                if (!_game.MoveCard(_card, null))
+                {
                     _game.PlayErrorSfx();
+                    Shake();
+                    HapticLight();
+                }
             }
-
-            _lastClick = Time.time;
         }
 
         #endregion IEventSystemHandlers

@@ -22,9 +22,6 @@ namespace Solitaire.Presenters
         private Vector3 PosLandscape;
 
         [Inject]
-        private readonly IDragAndDropHandler _dndHandler;
-
-        [Inject]
         private readonly Game _game;
 
         [Inject]
@@ -33,10 +30,26 @@ namespace Solitaire.Presenters
         [Inject]
         private readonly Pile _pile;
 
+        // On wider screens (tablets) the columns spread out horizontally so the
+        // board isn't a narrow strip in the middle. Phones at or below the
+        // reference aspect keep their designed spacing; wider screens get more.
+        private const float SpreadReferenceAspect = 0.60f;
+        private const float MaxSpread = 1.45f;
+
+        private Vector2Int _lastScreen;
+
+        // Portrait layout uses the position the pile was authored at in the
+        // scene, so whatever spacing looks good in the editor is what ships.
+        // PosPortrait is no longer the source of truth (it drifted from the
+        // scene); only PosLandscape still drives the rotated layout.
+        // ponytail: authored scene transform is the source of truth, no per-pile data to keep in sync
+        private Vector3 _authoredPos;
+
         public Pile Pile => _pile;
 
         private void Awake()
         {
+            _authoredPos = transform.position;
             _pile.Init(Type, Arrangement, transform.position);
         }
 
@@ -46,24 +59,21 @@ namespace Solitaire.Presenters
             _orientation.State.Subscribe(UpdateLayout).AddTo(this);
         }
 
-        public void OnDrop(PointerEventData eventData)
+        private void Update()
         {
-            if (eventData == null || eventData.pointerDrag == null)
-                return;
-
-            if (
-                eventData.pointerDrag.TryGetComponent(out CardPresenter cardPresenter)
-                && _pile.CanAddCard(cardPresenter.Card)
-            )
+            // Re-apply layout when the screen size changes (rotation, resize) so
+            // the responsive column spacing follows the current screen width.
+            if (Screen.width != _lastScreen.x || Screen.height != _lastScreen.y)
             {
-                _dndHandler.Drop();
-                _game.MoveCard(cardPresenter.Card, _pile);
-            }
-            else
-            {
-                _game.PlayErrorSfx();
+                _lastScreen = new Vector2Int(Screen.width, Screen.height);
+                UpdateLayout(_orientation.State.Value);
             }
         }
+
+        // Drop is resolved by the dragged card via overlap detection (see
+        // CardPresenter.FindOverlapPile), so the pile's pointer-based drop is a
+        // no-op. Empty piles are still detected because they keep their collider.
+        public void OnDrop(PointerEventData eventData) { }
 
         public void OnPointerClick(PointerEventData eventData)
         {
@@ -73,10 +83,22 @@ namespace Solitaire.Presenters
 
         private void UpdateLayout(Orientation orientation)
         {
-            var position = orientation == Orientation.Landscape ? PosLandscape : PosPortrait;
+            var position = orientation == Orientation.Landscape ? PosLandscape : _authoredPos;
+
+            // Widen the horizontal gaps based on screen width (portrait only)
+            position.x *= HorizontalSpread(orientation);
 
             transform.position = position;
             _pile.UpdatePosition(position);
+        }
+
+        private static float HorizontalSpread(Orientation orientation)
+        {
+            if (orientation != Orientation.Portrait || Screen.height <= 0)
+                return 1f;
+
+            var aspect = (float)Screen.width / Screen.height;
+            return Mathf.Clamp(aspect / SpreadReferenceAspect, 1f, MaxSpread);
         }
     }
 }

@@ -47,8 +47,6 @@ namespace Solitaire.Commands
                 _pileStock.AddCard(card);
                 _cards.RemoveAt(i);
             }
-
-            _audioService.PlaySfx(Audio.SfxDraw, 0.5f);
         }
 
         public void Dispose()

@@ -7,6 +7,7 @@ using Solitaire.Helpers;
 using Solitaire.Services;
 using UniRx;
 using Zenject;
+using UnityEngine;
 using Random = UnityEngine.Random;
 
 namespace Solitaire.Models
@@ -56,6 +57,9 @@ namespace Solitaire.Models
 
         [Inject]
         private readonly Leaderboard _leaderboard;
+
+        [Inject]
+        private readonly ILevelService _levelService;
 
         [Inject]
         private readonly MoveCardCommand.Factory _moveCardCommandFactory;
@@ -125,10 +129,11 @@ namespace Solitaire.Models
             _movesService.Increment();
         }
 
-        public void MoveCard(Card card, Pile pile)
+        // Returns true if the card was moved. Caller handles failure feedback.
+        public bool MoveCard(Card card, Pile pile)
         {
             if (card == null)
-                return;
+                return false;
 
             // Try to find valid move for the card
             if (pile == null)
@@ -136,16 +141,14 @@ namespace Solitaire.Models
 
             // Couldn't find move
             if (pile == null)
-            {
-                PlayErrorSfx();
-                return;
-            }
+                return false;
 
             // Move card to pile
             var command = _moveCardCommandFactory.Create(card, card.Pile, pile);
             command.Execute();
             _commandService.Add(command);
             _movesService.Increment();
+            return true;
         }
 
         public void DrawCard()
@@ -155,6 +158,94 @@ namespace Solitaire.Models
             command.Execute();
             _commandService.Add(command);
             _movesService.Increment();
+        }
+
+        public bool CanMagicWand()
+        {
+            for (var i = 0; i < PileStock.Cards.Count; i++)
+                if (!PileStock.Cards[i].IsFaceUp.Value && FindMagicTarget(PileStock.Cards[i]) != null)
+                    return true;
+            for (var t = 0; t < PileTableaus.Count; t++)
+                for (var i = 0; i < PileTableaus[t].Cards.Count; i++)
+                    if (!PileTableaus[t].Cards[i].IsFaceUp.Value
+                        && FindMagicTarget(PileTableaus[t].Cards[i]) != null)
+                        return true;
+            return false;
+        }
+
+        public bool MagicWand()
+        {
+            var found = 0;
+            var affectedPiles = new List<Pile>();
+
+            // Gather all face-down cards: stock first, then tableaus
+            var candidates = new List<Card>();
+            for (var i = PileStock.Cards.Count - 1; i >= 0; i--)
+                if (!PileStock.Cards[i].IsFaceUp.Value)
+                    candidates.Add(PileStock.Cards[i]);
+            for (var t = 0; t < PileTableaus.Count; t++)
+                for (var i = PileTableaus[t].Cards.Count - 1; i >= 0; i--)
+                    if (!PileTableaus[t].Cards[i].IsFaceUp.Value)
+                        candidates.Add(PileTableaus[t].Cards[i]);
+
+            foreach (var card in candidates)
+            {
+                if (found >= 2) break;
+                var target = FindMagicTarget(card);
+                if (target == null) continue;
+
+                var source = card.Pile;
+
+                // Flip the model face-up without triggering the flip animation
+                // (the card may currently be hidden deep in the stock).
+                if (!card.IsFaceUp.Value)
+                    card.Flip();
+
+                target.AddCard(card);
+
+                // A card pulled from a hidden stock slot stays culled — force it
+                // back on so it actually shows at the destination.
+                card.IsVisible.Value = true;
+                card.IsInteractable.Value = true;
+
+                if (source != null && !affectedPiles.Contains(source))
+                    affectedPiles.Add(source);
+                if (!affectedPiles.Contains(target))
+                    affectedPiles.Add(target);
+                found++;
+            }
+
+            // Recompute every affected pile from scratch so waterfall offsets read
+            // settled positions, not cards still mid-animation.
+            for (var i = 0; i < affectedPiles.Count; i++)
+                affectedPiles[i].UpdatePosition(affectedPiles[i].Position);
+
+            return found > 0;
+        }
+
+        private Pile FindMagicTarget(Card card)
+        {
+            // Foundation first
+            for (var f = 0; f < PileFoundations.Count; f++)
+            {
+                var top = PileFoundations[f].TopCard();
+                if (top == null && card.Type == Card.Types.Ace)
+                    return PileFoundations[f];
+                if (top != null && top.Suit == card.Suit && top.Type == card.Type - 1)
+                    return PileFoundations[f];
+            }
+
+            // Then tableau
+            for (var t = 0; t < PileTableaus.Count; t++)
+            {
+                var top = PileTableaus[t].TopCard();
+                if (top == null && card.Type == Card.Types.King)
+                    return PileTableaus[t];
+                if (top != null && top.Type == card.Type + 1 && IsOppositeColor(card, top))
+                    return PileTableaus[t];
+            }
+
+            return null;
         }
 
         public void PlayErrorSfx()
@@ -253,17 +344,76 @@ namespace Solitaire.Models
 
         private void ShuffleCards()
         {
-            //// Shuffle by sorting
-            //Cards = Cards.OrderBy(a => Guid.NewGuid()).ToList();
-
-            // Fisher-Yates shuffle
             for (var i = Cards.Count - 1; i > 0; i--)
             {
                 var n = Random.Range(0, i + 1);
-                var temp = Cards[i];
-                Cards[i] = Cards[n];
-                Cards[n] = temp;
+                (Cards[i], Cards[n]) = (Cards[n], Cards[i]);
             }
+        }
+
+        // ponytail: generate N random shuffles, keep the most playable one
+        private void ShuffleBestOf(int attempts)
+        {
+            var original = new List<Card>(Cards);
+            List<Card> best = null;
+            var bestScore = int.MinValue;
+
+            for (var a = 0; a < attempts; a++)
+            {
+                for (var i = 0; i < original.Count; i++) Cards[i] = original[i];
+                ShuffleCards();
+
+                var score = ScoreDeal();
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    best = new List<Card>(Cards);
+                }
+            }
+
+            for (var i = 0; i < best.Count; i++) Cards[i] = best[i];
+        }
+
+        // Cards are dealt from the END of the list. Tableau face-up cards land at these indices.
+        private static readonly int[] FaceUpIndices = { 51, 49, 46, 42, 37, 31, 24 };
+
+        private int ScoreDeal()
+        {
+            var score = 0;
+
+            for (var i = 0; i < Cards.Count; i++)
+            {
+                // Aces near the surface (high index) = good
+                if (Cards[i].Type == Card.Types.Ace)
+                    score += i * 2;
+
+                // Low cards (2, 3) near surface = easier to build on aces
+                if (Cards[i].Type <= Card.Types.Three && i > 23)
+                    score += 3;
+            }
+
+            // Valid moves between face-up tableau cards
+            for (var a = 0; a < FaceUpIndices.Length; a++)
+            for (var b = 0; b < FaceUpIndices.Length; b++)
+            {
+                if (a == b) continue;
+                var cardA = Cards[FaceUpIndices[a]];
+                var cardB = Cards[FaceUpIndices[b]];
+                if (cardB.Type == cardA.Type + 1 && IsOppositeColor(cardA, cardB))
+                    score += 10;
+            }
+
+            // Kings face-up with no empty column to use = wasted slot
+            for (var i = 0; i < FaceUpIndices.Length; i++)
+                if (Cards[FaceUpIndices[i]].Type == Card.Types.King)
+                    score -= 5;
+
+            return score;
+        }
+
+        private static bool IsOppositeColor(Card a, Card b)
+        {
+            return (int)a.Suit / 2 != (int)b.Suit / 2;
         }
 
         private async UniTask DealAsync()
@@ -334,6 +484,9 @@ namespace Solitaire.Models
             } while (cardsInTableaus > 0);
 
             AddPointsAndSaveLeaderboard();
+
+            // A finished game advances the player's level (persisted).
+            _levelService.Increment();
         }
 
         private void Restart()
@@ -345,7 +498,7 @@ namespace Solitaire.Models
         private void NewMatch()
         {
             Reset();
-            ShuffleCards();
+            ShuffleBestOf(10);
             DealAsync().Forget();
         }
 
