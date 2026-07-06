@@ -67,3 +67,5 @@ MonoBehaviour:
     - {fileID: 8300000, guid: 4fcfcad5e0724684e9e61352ab29b073, type: 3}
     - {fileID: 8300000, guid: 0e66ff3f73426a34a8be1216e58190be, type: 3}
     - {fileID: 8300000, guid: d756d6e87c12dbb4599f4fe389549135, type: 3}
+  _magicWand:
+    StartingCharges: 1

@@ -62,15 +62,30 @@ namespace Solitaire.Models
             MagicWandCommand
                 .Subscribe(_ =>
                 {
-                    // Only spend a charge if the wand actually revealed something.
-                    if (game.MagicWand())
+                    // The command is only enabled when a hidden card can be revealed,
+                    // so spend a charge and play the cinematic reveal.
+                    if (game.CanMagicWand())
                     {
                         magicWandService.TryUse();
                         audioService.PlaySfx(Audio.SfxMagicWand, 0.5f);
+                        game.MagicWandAsync().Forget();
                     }
                     // Bump moves so canMagicWand re-evaluates and the button updates.
                     movesService.Increment();
                 })
+                .AddTo(this);
+
+            // Re-check on every move (a move can reveal the last hidden card) and
+            // on play-state changes. Enabled once all cards are face-up, so the
+            // player can one-tap finish instead of placing every card by hand.
+            var canAutoComplete = isPlayingSource
+                .CombineLatest(movesService.Moves, (isPlaying, _) => isPlaying)
+                .Select(isPlaying => isPlaying && game.CanAutoComplete());
+
+            AutoCompleteCommand = new ReactiveCommand(canAutoComplete);
+
+            AutoCompleteCommand
+                .Subscribe(_ => game.AutoCompleteAsync().Forget())
                 .AddTo(this);
         }
 
@@ -78,5 +93,6 @@ namespace Solitaire.Models
         public ReactiveCommand UndoCommand { get; }
         public AsyncReactiveCommand HintCommand { get; }
         public ReactiveCommand MagicWandCommand { get; }
+        public ReactiveCommand AutoCompleteCommand { get; }
     }
 }

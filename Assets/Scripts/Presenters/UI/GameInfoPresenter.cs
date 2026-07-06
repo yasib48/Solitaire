@@ -17,12 +17,13 @@ namespace Solitaire.Presenters
 
         [Inject] private readonly IPointsService _pointsService;
 
+        [Inject] private readonly ITimerService _timerService;
+
         [Inject] private readonly GameState _gameState;
 
         // Elapsed time of the current game, shown as "m:ss" (e.g. 0:00, 1:05).
-        // Counts only while playing and resets on a new deal. Kept local to the
-        // HUD — no service needed for a display-only clock.
-        private float _elapsed;
+        // Counts only while playing and resets on a new deal. Backed by the
+        // shared ITimerService so the results table can read the finish time.
         private string _lastTime;
 
         // The value currently shown on the points label. Points tick up to their
@@ -47,10 +48,10 @@ namespace Solitaire.Presenters
             switch (_gameState.State.Value)
             {
                 case Game.State.Dealing:
-                    _elapsed = 0f;
+                    _timerService.Reset();
                     break;
                 case Game.State.Playing:
-                    _elapsed += Time.deltaTime;
+                    _timerService.Tick(Time.deltaTime);
                     break;
             }
 
@@ -89,8 +90,8 @@ namespace Solitaire.Presenters
             if (_labelTime == null)
                 return;
 
-            var minutes = (int)(_elapsed / 60f);
-            var seconds = (int)(_elapsed % 60f);
+            var minutes = (int)(_timerService.Elapsed / 60f);
+            var seconds = (int)(_timerService.Elapsed % 60f);
             var text = $"{minutes}:{seconds:00}";
             if (text == _lastTime)
                 return;

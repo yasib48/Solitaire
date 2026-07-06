@@ -64,25 +64,31 @@ namespace Solitaire.Presenters
 
         private Tweener _tweenScale;
         private Sequence _tweenShake;
-
-        // The card's authored scale (prefab), restored after a flip so face-up
+        private SpriteRenderer _dimOverlay;
+        private SpriteRenderer _highlightOverlay;// The card's authored scale (prefab), restored after a flip so face-up
         // cards don't snap back to 1 and end up smaller than face-down ones.
         private Vector3 _baseScale = Vector3.one;
 
         public Card Card => _card;
 
-        private void Start()
+private void Start()
         {
             _collider = GetComponent<BoxCollider2D>();
             _transform = transform;
             _baseScale = _transform.localScale;
+            CreateDimOverlay();
+            CreateHighlightOverlay();
 
             _card.Alpha.Subscribe(UpdateAlpha).AddTo(this);
+            _card.Dim.Subscribe(UpdateDim).AddTo(this);
+            _card.Highlight.Subscribe(UpdateHighlight).AddTo(this);
             _card.Order.Subscribe(UpdateOrder).AddTo(this);
+            _card.FrontOrderOverride.Subscribe(UpdateFrontOrderOverride).AddTo(this);
             _card.IsVisible.Subscribe(UpdateVisiblity).AddTo(this);
             _card.IsInteractable.Subscribe(UpdateInteractability).AddTo(this);
             _card.IsFaceUp.Where(CanFlip).Subscribe(AnimateFlip).AddTo(this);
             _card.Position.Where(CanMove).Subscribe(AnimateMove).AddTo(this);
+            _card.Scale.Subscribe(AnimateScale).AddTo(this);
         }
 
         #region IDisposable
@@ -112,9 +118,32 @@ namespace Solitaire.Presenters
                     .SetEase(Ease.Linear)
                     .SetAutoKill(false)
                     .OnStepComplete(() => Flip(_card.IsFaceUp.Value))
-                    .OnComplete(() => _transform.localScale = _baseScale);
+                    .OnComplete(() => _transform.localScale = _baseScale * _card.Scale.Value);
             else
                 _tweenScale.Restart();
+        }
+
+        private Tweener _tweenScaleMul;
+
+        // Smoothly grow/shrink the whole card by the model's Scale multiplier.
+        // Used by the magic wand to lift the revealed card for its centre reveal.
+        private void AnimateScale(float scale)
+        {
+            var target = _baseScale * scale;
+
+            if (Mathf.Approximately((_transform.localScale - target).sqrMagnitude, 0f))
+            {
+                _transform.localScale = target;
+                return;
+            }
+
+            if (_tweenScaleMul == null)
+                _tweenScaleMul = _transform
+                    .DOScale(target, _config.AnimationDuration)
+                    .SetEase(Ease.OutBack)
+                    .SetAutoKill(false);
+            else
+                _tweenScaleMul.ChangeEndValue(target, true).Restart();
         }
 
         private bool CanMove(Vector3 position)
@@ -173,14 +202,42 @@ namespace Solitaire.Presenters
             Destroy(vfx.gameObject, vfx.main.duration + vfx.main.startLifetime.constantMax);
         }
 
-        private void UpdateOrder(int order)
+private void UpdateOrder(int order)
         {
             var sortingOrder = order * 10;
             _back.sortingOrder = sortingOrder;
-            _front.sortingOrder = sortingOrder;
+            ApplyFrontSortingOrder();
             if (_type != null) _type.sortingOrder = sortingOrder + 1;
             if (_suit1 != null) _suit1.sortingOrder = sortingOrder + 1;
             if (_suit2 != null) _suit2.sortingOrder = sortingOrder + 1;
+            if (_dimOverlay != null)
+            {
+                _dimOverlay.sortingLayerID = _front.sortingLayerID;
+                _dimOverlay.sortingOrder = sortingOrder + 8;
+            }
+            if (_highlightOverlay != null)
+            {
+                _highlightOverlay.sortingLayerID = _front.sortingLayerID;
+                _highlightOverlay.sortingOrder = sortingOrder + 9;
+            }
+        }
+
+        private int? _frontOrderOverride;
+
+        // Lets a card's front-face sorting order be pinned to an exact value
+        // regardless of Order (see Card.FrontOrderOverride) - used by the magic
+        // wand's centre reveal so the card stays on top of everything else the
+        // whole time it's flying, without needing to touch Order at all (which
+        // still drives the pile's own stacking/back-face order as normal).
+        private void UpdateFrontOrderOverride(int? order)
+        {
+            _frontOrderOverride = order;
+            ApplyFrontSortingOrder();
+        }
+
+        private void ApplyFrontSortingOrder()
+        {
+            _front.sortingOrder = _frontOrderOverride ?? _card.Order.Value * 10;
         }
 
         private void UpdateAlpha(float alpha)
@@ -198,13 +255,96 @@ namespace Solitaire.Presenters
             if (_suit2 != null) { color = _suit2.color; color.a = alpha; _suit2.color = color; }
         }
 
-        private void UpdateVisiblity(bool isVisible)
+private void CreateDimOverlay()
+        {
+            if (_dimOverlay != null)
+                return;
+
+            var overlay = new GameObject("Dim Overlay");
+            overlay.transform.SetParent(transform, false);
+            overlay.transform.localPosition = Vector3.zero;
+            overlay.transform.localRotation = Quaternion.identity;
+            overlay.transform.localScale = Vector3.one;
+            _dimOverlay = overlay.AddComponent<SpriteRenderer>();
+            _dimOverlay.color = new Color(0f, 0f, 0f, 0f);
+            _dimOverlay.enabled = false;
+            UpdateDimSprite();
+        }
+
+        private void UpdateDim(float amount)
+        {
+            if (_dimOverlay == null)
+                return;
+
+            UpdateDimSprite();
+            amount = Mathf.Clamp01(amount);
+            var color = _dimOverlay.color;
+            color.a = amount;
+            _dimOverlay.color = color;
+            _dimOverlay.enabled = _card.IsVisible.Value && amount > 0.01f;
+        }
+
+        private void UpdateDimSprite()
+        {
+            if (_dimOverlay == null)
+                return;
+
+            _dimOverlay.sprite = _card.IsFaceUp.Value ? _front.sprite : _back.sprite;
+            _dimOverlay.flipX = _card.IsFaceUp.Value ? _front.flipX : _back.flipX;
+            _dimOverlay.flipY = _card.IsFaceUp.Value ? _front.flipY : _back.flipY;
+            _dimOverlay.sortingLayerID = _front.sortingLayerID;
+        }
+
+        private void CreateHighlightOverlay()
+        {
+            if (_highlightOverlay != null)
+                return;
+
+            var overlay = new GameObject("Highlight Overlay");
+            overlay.transform.SetParent(transform, false);
+            overlay.transform.localPosition = Vector3.zero;
+            overlay.transform.localRotation = Quaternion.identity;
+            overlay.transform.localScale = Vector3.one;
+            _highlightOverlay = overlay.AddComponent<SpriteRenderer>();
+            _highlightOverlay.color = new Color(1f, 0.87f, 0.15f, 0f);
+            _highlightOverlay.enabled = false;
+            UpdateHighlightSprite();
+        }
+
+        private void UpdateHighlight(float amount)
+        {
+            if (_highlightOverlay == null)
+                return;
+
+            UpdateHighlightSprite();
+            amount = Mathf.Clamp01(amount);
+            var color = _highlightOverlay.color;
+            color.a = amount * 0.6f;
+            _highlightOverlay.color = color;
+            _highlightOverlay.enabled = _card.IsVisible.Value && amount > 0.01f;
+        }
+
+        private void UpdateHighlightSprite()
+        {
+            if (_highlightOverlay == null)
+                return;
+
+            _highlightOverlay.sprite = _card.IsFaceUp.Value ? _front.sprite : _back.sprite;
+            _highlightOverlay.flipX = _card.IsFaceUp.Value ? _front.flipX : _back.flipX;
+            _highlightOverlay.flipY = _card.IsFaceUp.Value ? _front.flipY : _back.flipY;
+            _highlightOverlay.sortingLayerID = _front.sortingLayerID;
+        }
+
+
+private void UpdateVisiblity(bool isVisible)
         {
             _back.enabled = isVisible;
             _front.enabled = isVisible;
             if (_type != null) _type.enabled = isVisible;
             if (_suit1 != null) _suit1.enabled = isVisible;
             if (_suit2 != null) _suit2.enabled = isVisible;
+            UpdateDim(_card.Dim.Value);
+            UpdateHighlight(_card.Highlight.Value);
         }
 
         private void UpdateInteractability(bool isInteractable)
@@ -212,7 +352,7 @@ namespace Solitaire.Presenters
             _collider.enabled = isInteractable;
         }
 
-        private void Initialize()
+private void Initialize()
         {
             name = $"Card_{_card.Suit}_{_card.Type}";
 
@@ -235,12 +375,26 @@ namespace Solitaire.Presenters
                 _type.sprite = spriteType;
                 _type.color = color;
             }
+
+            // CardPresenters are pooled (e.g. hint-preview copies are spawned
+            // and despawned via the same pool as real cards). Card.Reset()
+            // sets Dim back to 0, but a ReactiveProperty only notifies
+            // subscribers when the value actually changes - if this pooled
+            // slot's last use also ended at Dim 0, UpdateDim never re-fires,
+            // so a leftover dim overlay from whatever that slot rendered
+            // previously would otherwise carry over onto the new card. Force
+            // it in sync explicitly on every spawn instead of relying on the
+            // reactive callback.
+            UpdateDim(_card.Dim.Value);
+            UpdateHighlight(_card.Highlight.Value);
         }
 
-        public void Flip(bool isFaceUp)
+public void Flip(bool isFaceUp)
         {
             _back.gameObject.SetActive(!isFaceUp);
             _front.gameObject.SetActive(isFaceUp);
+            UpdateDimSprite();
+            UpdateHighlightSprite();
         }
 
         private void Shake()

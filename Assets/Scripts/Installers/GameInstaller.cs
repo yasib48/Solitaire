@@ -36,6 +36,7 @@ namespace Solitaire.Installers
             Container.BindInterfacesAndSelfTo<DragAndDropHandler>().AsSingle();
             Container.BindInterfacesAndSelfTo<MovesService>().AsSingle();
             Container.BindInterfacesAndSelfTo<PointsService>().AsSingle();
+            Container.BindInterfacesAndSelfTo<TimerService>().AsSingle();
             Container.BindInterfacesAndSelfTo<HintService>().AsSingle();
             Container.BindInterfacesAndSelfTo<MagicWandService>().AsSingle();
             Container.BindInterfacesAndSelfTo<LevelService>().AsSingle();
@@ -44,6 +45,7 @@ namespace Solitaire.Installers
             Container.BindInterfacesAndSelfTo<AudioService>().AsSingle();
             Container.BindInterfacesAndSelfTo<AdService>().AsSingle();
             Container.BindInterfacesAndSelfTo<StorageService>().AsSingle();
+            Container.Bind<IMagicWandVfx>().FromComponentInHierarchy().AsSingle();
         }
 
         private void InstallGame()

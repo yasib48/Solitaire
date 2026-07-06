@@ -62,6 +62,9 @@ namespace Solitaire.Models
         private readonly ILevelService _levelService;
 
         [Inject]
+        private readonly IMagicWandVfx _magicWandVfx;
+
+        [Inject]
         private readonly MoveCardCommand.Factory _moveCardCommandFactory;
 
         [Inject]
@@ -69,6 +72,9 @@ namespace Solitaire.Models
 
         [Inject]
         private readonly IPointsService _pointsService;
+
+        [Inject]
+        private readonly ITimerService _timerService;
 
         [Inject]
         private readonly RefillStockCommand.Factory _refillStockCommandFactory;
@@ -91,6 +97,7 @@ namespace Solitaire.Models
         public ReactiveCommand RestartCommand { get; }
         public ReactiveCommand NewMatchCommand { get; }
         public ReactiveCommand ContinueCommand { get; }
+        public Subject<GameEndResult> GameEnded { get; } = new();
 
         public Pile PileStock { get; private set; }
         public Pile PileWaste { get; private set; }
@@ -162,49 +169,133 @@ namespace Solitaire.Models
 
         public bool CanMagicWand()
         {
-            for (var i = 0; i < PileStock.Cards.Count; i++)
-                if (!PileStock.Cards[i].IsFaceUp.Value && FindMagicTarget(PileStock.Cards[i]) != null)
-                    return true;
             for (var t = 0; t < PileTableaus.Count; t++)
                 for (var i = 0; i < PileTableaus[t].Cards.Count; i++)
                     if (!PileTableaus[t].Cards[i].IsFaceUp.Value
                         && FindMagicTarget(PileTableaus[t].Cards[i]) != null)
                         return true;
+
+            for (var i = 0; i < PileStock.Cards.Count; i++)
+                if (!PileStock.Cards[i].IsFaceUp.Value && FindMagicTarget(PileStock.Cards[i]) != null)
+                    return true;
+
             return false;
         }
 
-        public bool MagicWand()
+        // Front-face sorting order the revealed card(s) are pinned to from the
+        // moment they pop to the front until they've fully landed back in their
+        // pile, so the reveal always stays on top instead of dipping behind
+        // other cards during its flight home. Set via Card.FrontOrderOverride,
+        // not Order - Order keeps driving the card's normal pile stacking.
+        private const int RevealFrontOrder = 100;
+
+        // Cinematic reveal: dims the board, then for up to two hidden cards flips
+        // them face-up, lifts each to the centre with a golden glow and sparkles,
+        // and finally sends it home to its pile.
+        public async UniTask MagicWandAsync()
         {
-            var found = 0;
             var affectedPiles = new List<Pile>();
 
-            // Gather all face-down cards: stock first, then tableaus
+            // Prefer face-down tableau cards. Only fall back to stock when no
+            // tableau card can be revealed and moved.
             var candidates = new List<Card>();
-            for (var i = PileStock.Cards.Count - 1; i >= 0; i--)
-                if (!PileStock.Cards[i].IsFaceUp.Value)
-                    candidates.Add(PileStock.Cards[i]);
             for (var t = 0; t < PileTableaus.Count; t++)
                 for (var i = PileTableaus[t].Cards.Count - 1; i >= 0; i--)
                     if (!PileTableaus[t].Cards[i].IsFaceUp.Value)
                         candidates.Add(PileTableaus[t].Cards[i]);
 
+            if (!candidates.Any(card => FindMagicTarget(card) != null))
+                for (var i = PileStock.Cards.Count - 1; i >= 0; i--)
+                    if (!PileStock.Cards[i].IsFaceUp.Value)
+                        candidates.Add(PileStock.Cards[i]);
+
+            // Pick up to two cards that actually have somewhere to go. Each card
+            // must land on a *different* target pile: FindMagicTarget evaluates
+            // the current board, so without this two same-rank cards (e.g. both
+            // red 5s onto the same black 6) would both be judged valid and end
+            // up stacked on top of each other illegally.
+            var plans = new List<(Card card, Pile source, Pile target)>();
+            var reservedTargets = new HashSet<Pile>();
             foreach (var card in candidates)
             {
-                if (found >= 2) break;
+                if (plans.Count >= 2) break;
                 var target = FindMagicTarget(card);
-                if (target == null) continue;
+                if (target == null || reservedTargets.Contains(target)) continue;
+                plans.Add((card, card.Pile, target));
+                reservedTargets.Add(target);
+            }
 
-                var source = card.Pile;
+            if (plans.Count == 0)
+                return;
 
-                // Flip the model face-up without triggering the flip animation
-                // (the card may currently be hidden deep in the stock).
+            var animMs = (int)(_cardConfig.AnimationDuration * 1000) + 30;
+
+            await _magicWandVfx.FadeAsync(true);
+            SetCardsDimmed(true);
+
+            var origins = new Vector3[plans.Count];
+            for (var i = 0; i < plans.Count; i++)
+                origins[i] = plans[i].card.Position.Value;
+
+            // Intro: the wand icon flies to the centre, grows, then hops over
+            // each card it's about to reveal, lighting it up (yellow) as it
+            // lands on it, as if selecting them.
+            await _magicWandVfx.WaveWandAsync(origins, i =>
+            {
+                if (i >= 0 && i < plans.Count)
+                    plans[i].card.Highlight.Value = 1f;
+            });
+
+            // Phase 1: pop every card to the front and flip them face-up, all
+            // at the same time, right where each one sits. The yellow selection
+            // highlight is cleared here so the revealed card shows its real
+            // colours, not tinted yellow.
+            for (var i = 0; i < plans.Count; i++)
+            {
+                var (card, _, _) = plans[i];
+                card.Highlight.Value = 0f;
+                card.IsVisible.Value = true;
+                card.IsInteractable.Value = false;
+                card.Dim.Value = 0f;
+                card.FrontOrderOverride.Value = RevealFrontOrder;
                 if (!card.IsFaceUp.Value)
                     card.Flip();
+            }
 
+            await UniTask.Delay(animMs);
+            for (var i = 0; i < plans.Count; i++)
+                _magicWandVfx.Sparkle(origins[i]);
+
+            // Phase 2: lift each card to its side-by-side slot in the centre
+            // of the screen one after another, so they arrive in sequence
+            // instead of popping up all at once.
+            var glows = new Transform[plans.Count];
+            for (var i = 0; i < plans.Count; i++)
+            {
+                var (card, _, _) = plans[i];
+                var slot = _magicWandVfx.GetRevealSlot(i, plans.Count);
+                card.Scale.Value = _magicWandVfx.RevealScale;
+                card.Position.Value = slot;
+                glows[i] = _magicWandVfx.ShowGlow(slot);
+
+                if (i < plans.Count - 1)
+                    await UniTask.Delay(_magicWandVfx.LiftStaggerMs);
+            }
+
+            await UniTask.Delay(animMs + _magicWandVfx.HoldMs);
+
+            // Phase 3: send every card home to its pile at the same time.
+            for (var i = 0; i < plans.Count; i++)
+            {
+                var (card, source, target) = plans[i];
+
+                _magicWandVfx.HideGlow(glows[i]);
+                card.Scale.Value = 1f;
                 target.AddCard(card);
 
-                // A card pulled from a hidden stock slot stays culled — force it
-                // back on so it actually shows at the destination.
+                // FrontOrderOverride is still active from phase 1, so the card
+                // stays on top through this whole return flight regardless of
+                // whatever pile order AddCard just gave it.
                 card.IsVisible.Value = true;
                 card.IsInteractable.Value = true;
 
@@ -212,15 +303,31 @@ namespace Solitaire.Models
                     affectedPiles.Add(source);
                 if (!affectedPiles.Contains(target))
                     affectedPiles.Add(target);
-                found++;
             }
+
+            await UniTask.Delay(animMs);
+            for (var i = 0; i < plans.Count; i++)
+            {
+                var card = plans[i].card;
+                card.FrontOrderOverride.Value = null;
+                _magicWandVfx.Sparkle(card.Position.Value);
+            }
+
+            await _magicWandVfx.FadeAsync(false);
+            SetCardsDimmed(false);
 
             // Recompute every affected pile from scratch so waterfall offsets read
             // settled positions, not cards still mid-animation.
             for (var i = 0; i < affectedPiles.Count; i++)
                 affectedPiles[i].UpdatePosition(affectedPiles[i].Position);
 
-            return found > 0;
+            // The wand rearranges the board directly (it pulls out a hidden,
+            // possibly buried card) without going through the command system, so
+            // the existing undo stack now refers to a board that no longer
+            // matches. Undoing a prior move against this changed board flips the
+            // wrong card and leaves face-up/face-down cards mis-layered. Clear
+            // the history so undo can't corrupt the board after a wand reveal.
+            _commandService.Reset();
         }
 
         private Pile FindMagicTarget(Card card)
@@ -255,21 +362,75 @@ namespace Solitaire.Models
 
         public void DetectWinCondition()
         {
-            // All cards in the tableau piles should be revelead
-            for (var i = 0; i < PileTableaus.Count; i++)
-            {
-                var pileTableau = PileTableaus[i];
-
-                for (var j = 0; j < pileTableau.Cards.Count; j++)
-                    if (!pileTableau.Cards[j].IsFaceUp.Value)
-                        return;
-            }
-
-            // The stock and waste piles should be empty
-            if (PileStock.HasCards || PileWaste.HasCards)
+            if (Cards == null)
                 return;
 
+            // Real win only once every card is actually on a foundation. The
+            // "all cards revealed" state used to auto-win here; now it just
+            // lights up the Complete button (see CanAutoComplete) and the game
+            // waits for the player - either they place the rest by hand, or
+            // press Complete to auto-finish.
+            for (var i = 0; i < Cards.Count; i++)
+                if (!(Cards[i].IsInPile && Cards[i].Pile.IsFoundation))
+                    return;
+
             WinAsync().Forget();
+        }
+
+        // True once every hidden card in the TABLEAU piles has been revealed
+        // (the stock may still hold cards - those don't block it) while at least
+        // one card still needs to reach a foundation. Drives the Complete button.
+        public bool CanAutoComplete()
+        {
+            if (Cards == null || _gameState.State.Value != State.Playing)
+                return false;
+
+            // Any face-down card still sitting in a tableau blocks it.
+            for (var t = 0; t < PileTableaus.Count; t++)
+                for (var j = 0; j < PileTableaus[t].Cards.Count; j++)
+                    if (!PileTableaus[t].Cards[j].IsFaceUp.Value)
+                        return false;
+
+            // At least one card still off the foundations means there's work left.
+            for (var i = 0; i < Cards.Count; i++)
+                if (!(Cards[i].IsInPile && Cards[i].Pile.IsFoundation))
+                    return true;
+
+            return false;
+        }
+
+        // Complete button handler: with every card already face-up the deal is
+        // guaranteed solvable, so fly the cards onto the foundations one by one,
+        // lowest rank to highest, then finish the game.
+        public async UniTask AutoCompleteAsync()
+        {
+            if (!CanAutoComplete())
+                return;
+
+            _gameState.State.Value = State.Win;
+            HasStarted.Value = false;
+
+            var delayMs = Mathf.Max(40, (int)(_cardConfig.AnimationDuration * 1000) / 3);
+
+            for (var t = 0; t <= (int)Card.Types.King; t++)
+            {
+                for (var s = 0; s < PileFoundations.Count && s < 4; s++)
+                {
+                    var card = FindCard((Card.Suits)s, (Card.Types)t);
+                    if (card == null)
+                        continue;
+
+                    card.IsInteractable.Value = false;
+                    card.IsVisible.Value = true;
+                    if (!card.IsFaceUp.Value)
+                        card.Flip();
+                    PileFoundations[s].AddCard(card);
+
+                    await UniTask.Delay(delayMs);
+                }
+            }
+
+            FinishGame();
         }
 
         public async UniTask TryShowHintAsync()
@@ -377,19 +538,66 @@ namespace Solitaire.Models
         // Cards are dealt from the END of the list. Tableau face-up cards land at these indices.
         private static readonly int[] FaceUpIndices = { 51, 49, 46, 42, 37, 31, 24 };
 
+        // Cards[0, StockCount) make up the stock after dealing (52 - 28 tableau cards).
+        private const int StockCount = 24;
+
+        // Cards at or above this index sit in the first draw-batches of the stock,
+        // reachable well before any recycle — treat them as "soon reachable" too.
+        private const int SoonReachableStockIndex = 12;
+
+        // Weight applied per unit of depth, per rank — Aces matter far more than
+        // Fours since a deeply-buried Ace can single-handedly stall every
+        // foundation, which is the single biggest cause of a deal becoming
+        // unplayable late on.
+        private static readonly int[] LowRankWeight = { 4, 3, 2, 1 }; // Ace, Two, Three, Four
+
+        // How many cards must be drawn (stock) or removed (tableau column) before
+        // the card at each dealt position becomes playable. This depends only on
+        // the fixed dealing layout (see DealAsync/FaceUpIndices), not on the
+        // shuffle, so it's built once. Lower is always more accessible — unlike
+        // the raw index, which runs "backwards" between the stock and tableau
+        // regions (index StockCount-1 is the soonest-drawn stock card, but within
+        // a tableau column the LOWEST index is the shallowest/face-up one).
+        private static readonly int[] AccessDepth = BuildAccessDepth();
+
+        private static int[] BuildAccessDepth()
+        {
+            var depth = new int[52];
+
+            for (var i = 0; i < StockCount; i++)
+                depth[i] = StockCount - 1 - i;
+
+            for (var c = 0; c < FaceUpIndices.Length; c++)
+            {
+                var faceUp = FaceUpIndices[c];
+                for (var d = 0; d <= c; d++)
+                    depth[faceUp + d] = d;
+            }
+
+            return depth;
+        }
+
         private int ScoreDeal()
         {
             var score = 0;
 
             for (var i = 0; i < Cards.Count; i++)
             {
-                // Aces near the surface (high index) = good
-                if (Cards[i].Type == Card.Types.Ace)
-                    score += i * 2;
+                var card = Cards[i];
+                var rankIndex = (int)card.Type;
+                var depth = AccessDepth[i];
 
-                // Low cards (2, 3) near surface = easier to build on aces
-                if (Cards[i].Type <= Card.Types.Three && i > 23)
-                    score += 3;
+                // Low cards need to surface early to start/advance foundations and
+                // to free up tableau moves. Weight the penalty by both how buried
+                // the card is (depth) and how low its rank is.
+                if (rankIndex < LowRankWeight.Length)
+                    score -= depth * LowRankWeight[rankIndex];
+
+                // An ace stuck deep in the stock needs a full recycle (or more)
+                // before it can even be drawn — penalise that heavily on top of
+                // the depth penalty above.
+                if (card.Type == Card.Types.Ace && i < StockCount && depth >= SoonReachableStockIndex)
+                    score -= 60;
             }
 
             // Valid moves between face-up tableau cards
@@ -401,6 +609,22 @@ namespace Solitaire.Models
                 var cardB = Cards[FaceUpIndices[b]];
                 if (cardB.Type == cardA.Type + 1 && IsOppositeColor(cardA, cardB))
                     score += 10;
+            }
+
+            // Same check, but between the face-up tableau cards and the first
+            // couple of stock draws — catches early sequencing opportunities
+            // that the face-up-only check above misses. The stock occupies
+            // indices [0, StockCount) with the top (first drawn) card at
+            // StockCount - 1.
+            for (var s = 0; s < SoonReachableStockIndex; s++)
+            {
+                var cardS = Cards[StockCount - 1 - s];
+                for (var a = 0; a < FaceUpIndices.Length; a++)
+                {
+                    var cardA = Cards[FaceUpIndices[a]];
+                    if (cardS.Type == cardA.Type + 1 && IsOppositeColor(cardA, cardS))
+                        score += 4;
+                }
             }
 
             // Kings face-up with no empty column to use = wasted slot
@@ -483,22 +707,117 @@ namespace Solitaire.Models
                 }
             } while (cardsInTableaus > 0);
 
+            FinishGame();
+        }
+
+        // End-of-game bookkeeping shared by the real win, the instant test win and
+        // the animated test auto-complete: banks points, advances the level and
+        // raises GameEnded so the UI can run its celebration/reward flow.
+        private void FinishGame()
+        {
             AddPointsAndSaveLeaderboard();
 
-            // A finished game advances the player's level (persisted).
-            _levelService.Increment();
+            var points = _pointsService.Points.Value;
+            var moves = _movesService.Moves.Value;
+            var timeSeconds = _timerService.ElapsedSeconds;
+
+            // Winning keeps the combo alive across the post-win "New Game";
+            // abandoning a game (restart / new deal before winning) breaks it.
+            _currentGameWon = true;
+
+            var levelResult = _levelService.AddCompletedGame(points, moves, timeSeconds);
+            GameEnded.OnNext(new GameEndResult
+            {
+                LeveledUp = levelResult.LeveledUp,
+                IsFirstLevelUp = levelResult.IsFirstLevelUp,
+                Level = levelResult.Level,
+                ExperienceGained = levelResult.ExperienceGained,
+                BaseXp = levelResult.BaseXp,
+                ComboXp = levelResult.ComboXp,
+                ComboCount = levelResult.ComboCount,
+                BestScoreXp = levelResult.BestScoreXp,
+                NewBestScore = levelResult.NewBestScore,
+                Points = points,
+                Moves = moves,
+                TimeSeconds = timeSeconds,
+                BestScore = levelResult.BestScore,
+                BestTimeSeconds = levelResult.BestTimeSeconds,
+                BestMoves = levelResult.BestMoves
+            });
+        }
+
+        // TEST ONLY: flip every card up and fly them onto the foundations by suit,
+        // then finish the game. Lets you exercise the whole end-of-game flow
+        // (celebration + level-up reward) from any board state.
+        public async UniTask ForceCompleteForTestAsync()
+        {
+            if (_gameState.State.Value == State.Win)
+                return;
+
+            _gameState.State.Value = State.Win;
+            HasStarted.Value = false;
+
+            for (var s = 0; s < PileFoundations.Count && s < 4; s++)
+            {
+                var foundation = PileFoundations[s];
+                for (var t = 0; t <= (int)Card.Types.King; t++)
+                {
+                    var card = FindCard((Card.Suits)s, (Card.Types)t);
+                    if (card == null)
+                        continue;
+
+                    if (!card.IsFaceUp.Value)
+                        card.Flip();
+                    card.IsVisible.Value = true;
+                    card.IsInteractable.Value = false;
+                    foundation.AddCard(card);
+
+                    await UniTask.DelayFrame(2);
+                }
+            }
+
+            FinishGame();
+        }
+
+        private Card FindCard(Card.Suits suit, Card.Types type)
+        {
+            for (var i = 0; i < Cards.Count; i++)
+                if (Cards[i].Suit == suit && Cards[i].Type == type)
+                    return Cards[i];
+
+            return null;
+        }
+
+        // Whether the current deal has been won. Drives whether starting a fresh
+        // deal keeps or breaks the consecutive-win combo.
+        private bool _currentGameWon;
+
+        private void BeginNewDeal()
+        {
+            // Leaving a deal we never won breaks the combo; leaving one we won
+            // (to play the next game) keeps it going.
+            if (!_currentGameWon)
+                _levelService.ResetCombo();
+            _currentGameWon = false;
         }
 
         private void Restart()
         {
+            BeginNewDeal();
             Reset();
             DealAsync().Forget();
         }
 
+        // Trying more shuffles costs only a handful of cheap in-memory scoring
+        // passes, so spend more of them looking for a deal that isn't prone to
+        // stalling out with buried aces or dead-end columns late in the game.
+        private const int NewMatchShuffleAttempts = 60;
+
         private void NewMatch()
         {
+            BeginNewDeal();
             Reset();
-            ShuffleBestOf(10);
+            ShuffleBestOf(NewMatchShuffleAttempts);
             DealAsync().Forget();
         }
 
@@ -531,6 +850,29 @@ namespace Solitaire.Models
             _leaderboard.Load();
         }
 
+        public class GameEndResult
+        {
+            public bool LeveledUp;
+            public bool IsFirstLevelUp;
+            public int Level;
+            public int ExperienceGained;
+
+            // XP breakdown, for the sequenced level-bar reveal.
+            public int BaseXp;
+            public int ComboXp;
+            public int ComboCount;
+            public int BestScoreXp;
+            public bool NewBestScore;
+
+            // This game's stats + the all-time records, for the results table.
+            public int Points;
+            public int Moves;
+            public int TimeSeconds;
+            public int BestScore;
+            public int BestTimeSeconds;
+            public int BestMoves;
+        }
+
         [Serializable]
         public class Config
         {
@@ -541,5 +883,28 @@ namespace Solitaire.Models
             public int PointsFoundationToTableau = -15;
             public int PointsRecycleWaste = -100;
         }
-    }
+    
+
+private void SetCardsDimmed(bool dimmed)
+        {
+            if (Cards == null)
+                return;
+
+            var amount = dimmed ? _magicWandVfx.CardDimAmount : 0f;
+            for (var i = 0; i < Cards.Count; i++)
+                Cards[i].Dim.Value = amount;
+        }
+
+
+public void ForceWinForTest()
+        {
+            if (_gameState.State.Value == State.Win)
+                return;
+
+            _gameState.State.Value = State.Win;
+            HasStarted.Value = false;
+            FinishGame();
+        }
 }
+}
+

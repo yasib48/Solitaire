@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using Cysharp.Threading.Tasks;
 using Solitaire.Models;
 using Solitaire.Services;
 using UniRx;
@@ -31,6 +32,13 @@ namespace Solitaire.Presenters
 
         [SerializeField]
         private Physics2DRaycaster _cardRaycaster;
+
+        [Header("Debug")]
+        [Tooltip("Tick this in play mode (or right-click the component → \"TEST → " +
+                 "Auto-complete & end\") to fly every card onto the foundations and " +
+                 "finish the game — runs the whole end-of-game / level-up flow.")]
+        [SerializeField]
+        private bool _autoCompleteForTest;
 
         [SerializeField]
         private PilePresenter _pileStock;
@@ -111,9 +119,23 @@ namespace Solitaire.Presenters
                 _frameDirty = true;
             }
 
+            if (_autoCompleteForTest)
+            {
+                _autoCompleteForTest = false;
+                TestAutoComplete();
+            }
+
             // Detect win condition
             if (_gameState.State.Value == Game.State.Playing)
                 _game.DetectWinCondition();
+        }
+
+        // Inspector right-click entry point for the same test auto-complete.
+        [ContextMenu("TEST → Auto-complete & end")]
+        private void TestAutoComplete()
+        {
+            if (_game != null)
+                _game.ForceCompleteForTestAsync().Forget();
         }
 
         private void LateUpdate()
