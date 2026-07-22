@@ -16,6 +16,7 @@ namespace Solitaire.Presenters
         private SpriteRenderer _renderer;
         private Vector2Int _lastScreen;
         private float _lastOrthoSize;
+        private Sprite _lastSprite;
 
         private void Awake()
         {
@@ -30,12 +31,17 @@ namespace Solitaire.Presenters
                 return;
 
             // Only refit when something that affects framing actually changed
+            // (screen size, camera zoom, or the sprite itself — e.g. a background
+            // swapped from the customize screen).
             if (
                 Screen.width == _lastScreen.x
                 && Screen.height == _lastScreen.y
                 && Mathf.Approximately(_camera.orthographicSize, _lastOrthoSize)
+                && _renderer.sprite == _lastSprite
             )
                 return;
+
+            _lastSprite = _renderer.sprite;
 
             _lastScreen = new Vector2Int(Screen.width, Screen.height);
             _lastOrthoSize = _camera.orthographicSize;

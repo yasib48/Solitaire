@@ -22,6 +22,10 @@ namespace Solitaire.Presenters
         private const int DailyGiftCoins = 20;
         private const int LevelRewardCoins = 10;
         private const string DailyLoginKey = "DailyLogin";
+        // Hard ceiling for the end-of-game XP reveal. Comfortably longer than the
+        // real animation (a few seconds); if it's exceeded, something stalled and
+        // we bail to the results screen so the game can't lock up.
+        private const float GameEndAnimationTimeoutSeconds = 12f;
 
         [Inject] private readonly Game _game;
         [Inject] private readonly ICurrencyService _currencyService;
@@ -29,9 +33,14 @@ namespace Solitaire.Presenters
 
         private GameObject _playPanel;
         private GameObject _settingsPanel;
+        private GameObject _customizePanel;
+        private GameObject _settingsButton;
+        private GameObject _customizeButton;
         private GameObject _newGamePanel;
         private GameObject _areYouSurePanel;
         private GameObject _giftBoxPanel;
+        private GameObject _dailyChallengePanel;
+        private DailyChallengePanelPresenter _dailyChallengePresenter;
         private GameObject _giftAdBadge1;
         private GameObject _giftAdBadge2;
         private GameObject _giftAdBadge3;
@@ -43,6 +52,7 @@ namespace Solitaire.Presenters
         private GameObject _prizeOpenPanel;
         private PrizeOpenPanelPresenter _prizeOpenPresenter;
         private GameObject _buyPanel;
+        private GameObject[] _shortcutBlockingPanels;
         private GameObject _background;
         private GameObject _levelBar;
         private LevelBarPresenter _levelBarPresenter;
@@ -58,6 +68,11 @@ namespace Solitaire.Presenters
         private TMP_Text _resultScoreBest;
         private TMP_Text _resultTimeBest;
         private TMP_Text _resultMovesBest;
+        // The "Best" column (header + the three value cells) and the "NEW BEST"
+        // badge graphics that replace it when the player sets a new record.
+        private GameObject _resultBestHeader;
+        private GameObject[] _resultBestCells;
+        private GameObject[] _resultNewBestBadges;
         private bool _coinAwardInProgress;
         private bool _pendingOpenNewGameAfterPrize;
         private bool _celebratingLevelUp;
@@ -81,6 +96,7 @@ namespace Solitaire.Presenters
 
         private void LateUpdate()
         {
+            SyncShortcutButtonsVisibility();
             SyncLevelBarVisibility();
         }
 
@@ -89,9 +105,17 @@ namespace Solitaire.Presenters
         {
             _playPanel = FindPath("Canvas/Play");
             _settingsPanel = FindPath("Canvas/Settings");
+            _customizePanel = FindPath("Canvas/Customize");
+            _settingsButton = FindPath("Canvas/Settings Button");
+            _customizeButton = FindPath("Canvas/Customize Button");
             _newGamePanel = FindPath("Canvas/New Game Panel");
             _areYouSurePanel = FindPath("Canvas/Are you sure Panel");
             _giftBoxPanel = FindPath("Canvas/Gift box Panel");
+            _dailyChallengePanel = FindPath("Canvas/Daily Panel");
+            _dailyChallengePresenter = _dailyChallengePanel != null
+                ? _dailyChallengePanel.GetComponent<DailyChallengePanelPresenter>()
+                : null;
+            _dailyChallengePresenter?.Initialize(_game, _storageService, () => Hide(_dailyChallengePanel));
             _giftAdBadge1 = FindPath("Canvas/Gift box Panel/Image/Button/Image (2)");
             _giftAdBadge2 = FindPath("Canvas/Gift box Panel/Image/Button (1)/Image");
             _giftAdBadge3 = FindPath("Canvas/Gift box Panel/Image/Button (2)/Image (1)");
@@ -102,6 +126,19 @@ namespace Solitaire.Presenters
             if (_prizeOpenPresenter == null && _prizeOpenPanel != null)
                 _prizeOpenPresenter = _prizeOpenPanel.AddComponent<PrizeOpenPanelPresenter>();
             _buyPanel = FindPath("Canvas/Buy Panel");
+            _shortcutBlockingPanels = new[]
+            {
+                _playPanel,
+                _settingsPanel,
+                _customizePanel,
+                _newGamePanel,
+                _areYouSurePanel,
+                _giftBoxPanel,
+                _dailyChallengePanel,
+                _prizeImagePanel,
+                _prizeOpenPanel,
+                _buyPanel
+            };
             _background = FindPath("Canvas/Background");
             _levelBar = FindPath("Canvas/Level Bar");
             CacheCoinFly();
@@ -116,11 +153,20 @@ namespace Solitaire.Presenters
         private void BindNavigation()
         {
             Bind("Canvas/Bottom Bar/Settings", () => ShowOnly(_settingsPanel));
-            Bind("Canvas/Bottom Bar/Daily", () => ShowOnly(_giftBoxPanel));
+            Bind("Canvas/Bottom Bar/Daily", () => ShowOnly(_dailyChallengePanel));
             Bind("Canvas/Bottom Bar/Play", () => ShowOnly(_playPanel));
             Bind("Canvas/Level Bar/Coin Counter", () => ShowOnly(_buyPanel));
             Bind("Canvas/Settings/Top Panel/Back", () => Hide(_settingsPanel));
             Bind("Canvas/Buy Panel/Top Panel/Back", () => Hide(_buyPanel));
+            Bind("Canvas/Daily Panel/Top Panel/Back", () => Hide(_dailyChallengePanel));
+            Bind("Canvas/Daily Panel/Image/Back", () => Hide(_dailyChallengePanel));
+            Bind("Canvas/Daily Panel/Back", () => Hide(_dailyChallengePanel));
+
+            // In-game shortcut buttons that open their panels, plus the Customize
+            // panel's own back button to close it again.
+            Bind("Canvas/Settings Button", () => ShowOnly(_settingsPanel));
+            Bind("Canvas/Customize Button", () => ShowOnly(_customizePanel));
+            Bind("Canvas/Customize/Top Panel/Back", () => Hide(_customizePanel));
         }
 
         private void BindPlayMenu()
@@ -128,7 +174,7 @@ namespace Solitaire.Presenters
             Bind("Canvas/Play/Menu Panel/Daily", () =>
             {
                 Hide(_playPanel);
-                ShowOnly(_giftBoxPanel);
+                ShowOnly(_dailyChallengePanel);
             });
 
             Bind("Canvas/Play/Menu Panel/New game", () =>
@@ -195,7 +241,8 @@ namespace Solitaire.Presenters
                 SyncGiftAdBadges(true);
             });
 
-            // "Continue" declines the multiplier gamble and just takes the base reward.
+            // "Continue" declines the multiplier gamble and just takes the flat
+            // base reward (no multiplier), then closes the prize.
             Bind("Canvas/Prize Image/BG/Continue", () =>
             {
                 AwardCoinsAndCloseLevelPrizeAsync(LevelRewardCoins).Forget();
@@ -309,6 +356,37 @@ namespace Solitaire.Presenters
             OpenPanel(panel);
         }
 
+        // The Settings/Customize shortcut buttons live on the bare game board.
+        // They ride along with the "close all UIs" flow: hidden while any panel
+        // is open, shown again once we're back on the board.
+        private void SetShortcutButtonsVisible(bool visible)
+        {
+            if (_settingsButton != null && _settingsButton.activeSelf != visible)
+                _settingsButton.SetActive(visible);
+            if (_customizeButton != null && _customizeButton.activeSelf != visible)
+                _customizeButton.SetActive(visible);
+        }
+
+        private void SyncShortcutButtonsVisibility()
+        {
+            SetShortcutButtonsVisible(!HasOpenShortcutBlockingPanel());
+        }
+
+        private bool HasOpenShortcutBlockingPanel()
+        {
+            if (_shortcutBlockingPanels == null)
+                return false;
+
+            for (var i = 0; i < _shortcutBlockingPanels.Length; i++)
+            {
+                var panel = _shortcutBlockingPanels[i];
+                if (panel != null && panel.activeInHierarchy)
+                    return true;
+            }
+
+            return false;
+        }
+
         private void Hide(GameObject panel)
         {
             if (panel == null)
@@ -331,6 +409,9 @@ namespace Solitaire.Presenters
 
             _activePanel = panel;
             CloseOtherPanels(panel);
+            // A panel is now up -> tuck the in-game shortcut buttons away so
+            // they don't float over it.
+            SetShortcutButtonsVisible(false);
             AnimateShow(panel);
             SyncLevelBarVisibility();
         }
@@ -339,6 +420,7 @@ namespace Solitaire.Presenters
         {
             _activePanel = null;
             CloseOtherPanels(null);
+            SyncShortcutButtonsVisibility();
             SetBackgroundVisible(false, true);
             SyncLevelBarVisibility();
         }
@@ -349,9 +431,11 @@ namespace Solitaire.Presenters
             {
                 _playPanel,
                 _settingsPanel,
+                _customizePanel,
                 _newGamePanel,
                 _areYouSurePanel,
                 _giftBoxPanel,
+                _dailyChallengePanel,
                 _prizeImagePanel,
                 _prizeOpenPanel,
                 _buyPanel
@@ -409,6 +493,7 @@ namespace Solitaire.Presenters
             {
                 panel.SetActive(false);
                 panel.transform.localScale = baseScale;
+                SyncShortcutButtonsVisibility();
             });
         }
 
@@ -518,10 +603,16 @@ namespace Solitaire.Presenters
                 _levelBar.SetActive(visible);
         }
 
+        // External flows (e.g. the Customize buy popup) can request the shared
+        // Level Bar slide open — using the exact same UiSlidePanel motion the
+        // Play menu uses — so the player can watch their coin balance. The
+        // per-frame reconciliation in SyncLevelBarVisibility honours it.
+        public bool ExternalLevelBarOpenRequest { get; set; }
+
         private void SyncLevelBarVisibility()
         {
             var shownInPlayMenu = _activePanel == _playPanel && _playPanel != null && _playPanel.activeSelf;
-            var shouldBeOpen = _coinAwardInProgress || _celebratingLevelUp || shownInPlayMenu;
+            var shouldBeOpen = _coinAwardInProgress || _celebratingLevelUp || shownInPlayMenu || ExternalLevelBarOpenRequest;
 
             if (_levelBarPresenter == null)
             {
@@ -575,6 +666,15 @@ namespace Solitaire.Presenters
                     await _coinFlyPresenter.PlayAsync(amount);
 
                 _currencyService.Add(amount);
+
+                // Adding to the balance kicks off the smooth count-up on the coin
+                // label (CoinCountDuration). Wait for it to actually finish - plus
+                // a short beat so the final number is readable - before the finally
+                // block slides the bar away. Otherwise it closed just as the count
+                // was starting to climb.
+                await UniTask.Delay(
+                    (int)((CoinCountDuration + CoinSettleHoldSeconds) * 1000f),
+                    DelayType.UnscaledDeltaTime);
             }
             finally
             {
@@ -646,6 +746,14 @@ namespace Solitaire.Presenters
                 _starFlyPresenter.PlayAsync(xp).Forget();
         }
 
+        private readonly List<TMP_Text> _coinLabels = new List<TMP_Text>();
+        private int _displayedBalance;
+        private Tweener _coinCountTween;
+        private const float CoinCountDuration = 0.6f;
+        // Extra beat to hold the settled coin total on screen after the count-up
+        // finishes, before the level bar slides away.
+        private const float CoinSettleHoldSeconds = 0.4f;
+
         // Binds every "Coin Amount" label in the UI to the real, persisted coin
         // balance so the on-screen count reflects money actually earned/saved
         // rather than a static placeholder.
@@ -656,22 +764,48 @@ namespace Solitaire.Presenters
                 return;
 
             var labels = canvas.GetComponentsInChildren<TMP_Text>(true);
-            var bound = new List<TMP_Text>();
             for (var i = 0; i < labels.Length; i++)
                 if (labels[i] != null && labels[i].gameObject.name == "Coin Amount")
-                    bound.Add(labels[i]);
+                    _coinLabels.Add(labels[i]);
 
-            if (bound.Count == 0)
+            if (_coinLabels.Count == 0)
                 return;
 
-            _currencyService.Balance
-                .Subscribe(balance =>
+            _displayedBalance = _currencyService.Balance.Value;
+            SetCoinLabels(_displayedBalance);
+
+            _currencyService.Balance.Subscribe(AnimateCoinBalance).AddTo(this);
+        }
+
+        // Smoothly counts the coin display toward the new balance instead of
+        // snapping — both up (rewards tick up) and down (a purchase visibly
+        // drains). The wallet is persistent (never reset like the score), so a
+        // decrease is always a real spend worth animating.
+        private void AnimateCoinBalance(int target)
+        {
+            _coinCountTween?.Kill();
+
+            if (target == _displayedBalance)
+            {
+                SetCoinLabels(target);
+                return;
+            }
+
+            _coinCountTween = DOTween
+                .To(() => _displayedBalance, x =>
                 {
-                    for (var i = 0; i < bound.Count; i++)
-                        if (bound[i] != null)
-                            bound[i].text = balance.ToString();
-                })
-                .AddTo(this);
+                    _displayedBalance = x;
+                    SetCoinLabels(x);
+                }, target, CoinCountDuration)
+                .SetEase(Ease.OutQuad)
+                .SetUpdate(true);
+        }
+
+        private void SetCoinLabels(int value)
+        {
+            for (var i = 0; i < _coinLabels.Count; i++)
+                if (_coinLabels[i] != null)
+                    _coinLabels[i].text = value.ToString();
         }
 
         private void CacheResultsTable()
@@ -683,6 +817,20 @@ namespace Solitaire.Presenters
             _resultScoreBest = FindLabel(root + "Score Best Value");
             _resultTimeBest = FindLabel(root + "Time Best Value");
             _resultMovesBest = FindLabel(root + "Moves Best Value");
+
+            _resultBestHeader = FindPath(root + "Best Header");
+            _resultBestCells = new[]
+            {
+                FindPath(root + "Score Best Value"),
+                FindPath(root + "Time Best Value"),
+                FindPath(root + "Moves Best Value")
+            };
+            _resultNewBestBadges = new[]
+            {
+                FindPath(root + "Score New Best"),
+                FindPath(root + "Time New Best"),
+                FindPath(root + "Moves New Best")
+            };
         }
 
         private static TMP_Text FindLabel(string path)
@@ -705,6 +853,31 @@ namespace Solitaire.Presenters
             if (_resultScoreBest != null) _resultScoreBest.text = result.BestScore > 0 ? result.BestScore.ToString() : "-";
             if (_resultTimeBest != null) _resultTimeBest.text = result.BestTimeSeconds > 0 ? FormatTime(result.BestTimeSeconds) : "-";
             if (_resultMovesBest != null) _resultMovesBest.text = result.BestMoves > 0 ? result.BestMoves.ToString() : "-";
+
+            ApplyNewBestState(result.NewBestScore);
+        }
+
+        // When the player sets a new record, hide the whole "Best" column (its
+        // header and the three value cells - the record is now just the player's
+        // own score in the "You" column) and light up the "NEW BEST" badges
+        // instead. Otherwise show the normal Best column and hide the badges.
+        private void ApplyNewBestState(bool isNewBest)
+        {
+            SetGoActive(_resultBestHeader, !isNewBest);
+
+            if (_resultBestCells != null)
+                for (var i = 0; i < _resultBestCells.Length; i++)
+                    SetGoActive(_resultBestCells[i], !isNewBest);
+
+            if (_resultNewBestBadges != null)
+                for (var i = 0; i < _resultNewBestBadges.Length; i++)
+                    SetGoActive(_resultNewBestBadges[i], isNewBest);
+        }
+
+        private static void SetGoActive(GameObject go, bool active)
+        {
+            if (go != null && go.activeSelf != active)
+                go.SetActive(active);
         }
 
         private static string FormatTime(int totalSeconds)
@@ -789,8 +962,19 @@ namespace Solitaire.Presenters
                 // Fly stars up into the XP bar as each XP chunk is added (base,
                 // combo, best), so the stars arrive while the bar is growing
                 // rather than all at once beforehand.
+                //
+                // Guarded with a timeout + catch: this reveal is pure eye-candy,
+                // and if any tween/await inside it ever fails or stalls (which
+                // has happened only in player builds), the player must NOT be
+                // stranded on a frozen board - we always fall through to the
+                // prize / New Game panel below.
                 if (_levelBarPresenter != null && result != null)
-                    await _levelBarPresenter.PlayGainAsync(result, PlayStarFlyForSegment);
+                    await _levelBarPresenter.PlayGainAsync(result, PlayStarFlyForSegment)
+                        .Timeout(TimeSpan.FromSeconds(GameEndAnimationTimeoutSeconds));
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"XP reveal did not finish cleanly, skipping to results: {e.Message}");
             }
             finally
             {

@@ -38,6 +38,9 @@ namespace Solitaire.Models
         private readonly Card.Config _cardConfig;
 
         [Inject]
+        private readonly Config _gameConfig;
+
+        [Inject]
         private readonly ICardSpawner _cardSpawner;
 
         [Inject]
@@ -71,6 +74,9 @@ namespace Solitaire.Models
         private readonly IMovesService _movesService;
 
         [Inject]
+        private readonly Options _options;
+
+        [Inject]
         private readonly IPointsService _pointsService;
 
         [Inject]
@@ -87,7 +93,7 @@ namespace Solitaire.Models
             RestartCommand.Subscribe(_ => Restart()).AddTo(this);
 
             NewMatchCommand = new ReactiveCommand();
-            NewMatchCommand.Subscribe(_ => NewMatch()).AddTo(this);
+            NewMatchCommand.Subscribe(_ => NewMatchAsync().Forget()).AddTo(this);
 
             ContinueCommand = new ReactiveCommand(HasStarted);
             ContinueCommand.Subscribe(_ => Continue()).AddTo(this);
@@ -104,6 +110,11 @@ namespace Solitaire.Models
         public IList<Pile> PileFoundations { get; private set; }
         public IList<Pile> PileTableaus { get; private set; }
         public IList<Card> Cards { get; private set; }
+        public string ActiveDailyKey { get; private set; }
+        public Subject<string> DailyGameWon { get; } = new();
+
+        private int? _pendingDailySeed;
+        private string _pendingDailyKey;
 
         public void Init(
             Pile pileStock,
@@ -119,6 +130,13 @@ namespace Solitaire.Models
 
             SpawnCards();
             LoadLeaderboard();
+        }
+
+        public void QueueDailyMatch(string dailyKey, int seed)
+        {
+            ActiveDailyKey = dailyKey;
+            _pendingDailyKey = dailyKey;
+            _pendingDailySeed = seed;
         }
 
         public void RefillStock()
@@ -424,7 +442,20 @@ namespace Solitaire.Models
                     card.IsVisible.Value = true;
                     if (!card.IsFaceUp.Value)
                         card.Flip();
+
+                    // Score each auto-placed card the same as a manual move to a
+                    // foundation, with the card's position so the score popup
+                    // still flies up. Waste and tableau both award the foundation
+                    // value; anything else (e.g. straight from stock) uses the
+                    // tableau->foundation value too, so no card is ever free.
+                    var source = card.Pile;
+                    var pos = card.Position.Value;
+                    var points = source != null && source.IsWaste
+                        ? _gameConfig.PointsWasteToFoundation
+                        : _gameConfig.PointsTableauToFoundation;
+
                     PileFoundations[s].AddCard(card);
+                    _pointsService.Add(points, pos);
 
                     await UniTask.Delay(delayMs);
                 }
@@ -512,127 +543,55 @@ namespace Solitaire.Models
             }
         }
 
-        // ponytail: generate N random shuffles, keep the most playable one
-        private void ShuffleBestOf(int attempts)
+        // Only accept a deal after the in-memory Klondike search completes all
+        // four foundations. Opening-layout guesses are not used.
+        private async UniTask ShuffleSolvableAsync(int attempts)
         {
             var original = new List<Card>(Cards);
             List<Card> best = null;
-            var bestScore = int.MinValue;
+            SolvableDealSearch.Result bestResult = null;
+            var solvedCandidates = 0;
 
             for (var a = 0; a < attempts; a++)
             {
                 for (var i = 0; i < original.Count; i++) Cards[i] = original[i];
                 ShuffleCards();
 
-                var score = ScoreDeal();
-                if (score > bestScore)
+                var candidate = new List<Card>(Cards);
+                var drawThree = _options.DrawThree.Value;
+                var result = await UniTask.RunOnThreadPool(
+                    () => SolvableDealSearch.Solve(candidate, drawThree, DealSearchStateLimit)
+                );
+                if (!result.IsSolved)
+                    continue;
+
+                solvedCandidates++;
+                if (result.IsEasierThan(bestResult))
                 {
-                    bestScore = score;
-                    best = new List<Card>(Cards);
+                    bestResult = result;
+                    best = candidate;
                 }
+                if (solvedCandidates >= VerifiedDealCandidates)
+                    break;
+            }
+
+            // A state cap may reject a solvable deal, but a deal that reaches
+            // this list is always proven. Never fall back to an unverified
+            // shuffle just because the first batch was difficult to search.
+            while (best == null)
+            {
+                for (var i = 0; i < original.Count; i++) Cards[i] = original[i];
+                ShuffleCards();
+                var candidate = new List<Card>(Cards);
+                var drawThree = _options.DrawThree.Value;
+                var result = await UniTask.RunOnThreadPool(
+                    () => SolvableDealSearch.Solve(candidate, drawThree, EmergencyDealSearchStateLimit)
+                );
+                if (result.IsSolved)
+                    best = candidate;
             }
 
             for (var i = 0; i < best.Count; i++) Cards[i] = best[i];
-        }
-
-        // Cards are dealt from the END of the list. Tableau face-up cards land at these indices.
-        private static readonly int[] FaceUpIndices = { 51, 49, 46, 42, 37, 31, 24 };
-
-        // Cards[0, StockCount) make up the stock after dealing (52 - 28 tableau cards).
-        private const int StockCount = 24;
-
-        // Cards at or above this index sit in the first draw-batches of the stock,
-        // reachable well before any recycle — treat them as "soon reachable" too.
-        private const int SoonReachableStockIndex = 12;
-
-        // Weight applied per unit of depth, per rank — Aces matter far more than
-        // Fours since a deeply-buried Ace can single-handedly stall every
-        // foundation, which is the single biggest cause of a deal becoming
-        // unplayable late on.
-        private static readonly int[] LowRankWeight = { 4, 3, 2, 1 }; // Ace, Two, Three, Four
-
-        // How many cards must be drawn (stock) or removed (tableau column) before
-        // the card at each dealt position becomes playable. This depends only on
-        // the fixed dealing layout (see DealAsync/FaceUpIndices), not on the
-        // shuffle, so it's built once. Lower is always more accessible — unlike
-        // the raw index, which runs "backwards" between the stock and tableau
-        // regions (index StockCount-1 is the soonest-drawn stock card, but within
-        // a tableau column the LOWEST index is the shallowest/face-up one).
-        private static readonly int[] AccessDepth = BuildAccessDepth();
-
-        private static int[] BuildAccessDepth()
-        {
-            var depth = new int[52];
-
-            for (var i = 0; i < StockCount; i++)
-                depth[i] = StockCount - 1 - i;
-
-            for (var c = 0; c < FaceUpIndices.Length; c++)
-            {
-                var faceUp = FaceUpIndices[c];
-                for (var d = 0; d <= c; d++)
-                    depth[faceUp + d] = d;
-            }
-
-            return depth;
-        }
-
-        private int ScoreDeal()
-        {
-            var score = 0;
-
-            for (var i = 0; i < Cards.Count; i++)
-            {
-                var card = Cards[i];
-                var rankIndex = (int)card.Type;
-                var depth = AccessDepth[i];
-
-                // Low cards need to surface early to start/advance foundations and
-                // to free up tableau moves. Weight the penalty by both how buried
-                // the card is (depth) and how low its rank is.
-                if (rankIndex < LowRankWeight.Length)
-                    score -= depth * LowRankWeight[rankIndex];
-
-                // An ace stuck deep in the stock needs a full recycle (or more)
-                // before it can even be drawn — penalise that heavily on top of
-                // the depth penalty above.
-                if (card.Type == Card.Types.Ace && i < StockCount && depth >= SoonReachableStockIndex)
-                    score -= 60;
-            }
-
-            // Valid moves between face-up tableau cards
-            for (var a = 0; a < FaceUpIndices.Length; a++)
-            for (var b = 0; b < FaceUpIndices.Length; b++)
-            {
-                if (a == b) continue;
-                var cardA = Cards[FaceUpIndices[a]];
-                var cardB = Cards[FaceUpIndices[b]];
-                if (cardB.Type == cardA.Type + 1 && IsOppositeColor(cardA, cardB))
-                    score += 10;
-            }
-
-            // Same check, but between the face-up tableau cards and the first
-            // couple of stock draws — catches early sequencing opportunities
-            // that the face-up-only check above misses. The stock occupies
-            // indices [0, StockCount) with the top (first drawn) card at
-            // StockCount - 1.
-            for (var s = 0; s < SoonReachableStockIndex; s++)
-            {
-                var cardS = Cards[StockCount - 1 - s];
-                for (var a = 0; a < FaceUpIndices.Length; a++)
-                {
-                    var cardA = Cards[FaceUpIndices[a]];
-                    if (cardS.Type == cardA.Type + 1 && IsOppositeColor(cardA, cardS))
-                        score += 4;
-                }
-            }
-
-            // Kings face-up with no empty column to use = wasted slot
-            for (var i = 0; i < FaceUpIndices.Length; i++)
-                if (Cards[FaceUpIndices[i]].Type == Card.Types.King)
-                    score -= 5;
-
-            return score;
         }
 
         private static bool IsOppositeColor(Card a, Card b)
@@ -725,6 +684,9 @@ namespace Solitaire.Models
             // abandoning a game (restart / new deal before winning) breaks it.
             _currentGameWon = true;
 
+            if (!string.IsNullOrEmpty(ActiveDailyKey))
+                DailyGameWon.OnNext(ActiveDailyKey);
+
             var levelResult = _levelService.AddCompletedGame(points, moves, timeSeconds);
             GameEnded.OnNext(new GameEndResult
             {
@@ -799,6 +761,8 @@ namespace Solitaire.Models
             if (!_currentGameWon)
                 _levelService.ResetCombo();
             _currentGameWon = false;
+            ActiveDailyKey = _pendingDailyKey;
+            _pendingDailyKey = null;
         }
 
         private void Restart()
@@ -808,16 +772,22 @@ namespace Solitaire.Models
             DealAsync().Forget();
         }
 
-        // Trying more shuffles costs only a handful of cheap in-memory scoring
-        // passes, so spend more of them looking for a deal that isn't prone to
-        // stalling out with buried aces or dead-end columns late in the game.
-        private const int NewMatchShuffleAttempts = 60;
+        private const int NewMatchShuffleAttempts = 12;
+        private const int VerifiedDealCandidates = 3;
+        private const int DealSearchStateLimit = 40000;
+        private const int EmergencyDealSearchStateLimit = 160000;
 
-        private void NewMatch()
+        private async UniTask NewMatchAsync()
         {
             BeginNewDeal();
             Reset();
-            ShuffleBestOf(NewMatchShuffleAttempts);
+            if (_pendingDailySeed.HasValue)
+            {
+                Random.InitState(_pendingDailySeed.Value);
+                _pendingDailySeed = null;
+            }
+
+            await ShuffleSolvableAsync(NewMatchShuffleAttempts);
             DealAsync().Forget();
         }
 

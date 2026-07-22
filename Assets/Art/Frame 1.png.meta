@@ -39,7 +39,7 @@ TextureImporter:
     mipBias: 0
     wrapU: 1
     wrapV: 1
-    wrapW: 0
+    wrapW: 1
   nPOTScale: 0
   lightmap: 0
   compressionQuality: 50
@@ -126,9 +126,9 @@ TextureImporter:
       name: Frame 1_0
       rect:
         serializedVersion: 2
-        x: 19
+        x: 20
         y: 30
-        width: 336
+        width: 335
         height: 171
       alignment: 0
       pivot: {x: 0.5, y: 0.5}

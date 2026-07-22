@@ -85,6 +85,18 @@ namespace Solitaire.Presenters
         [SerializeField, Range(0.2f, 3f)]
         private float _wandSmallScale = 1.1f;
 
+        [Tooltip("How high above each card the wand hovers, so it touches the card from above (dips down) rather than from below.")]
+        [SerializeField, Range(0f, 3f)]
+        private float _wandTouchYOffset = 1.6f;
+
+        [Tooltip("How much (degrees) the wand tilts as it dips onto a card. Lower = more upright. Kept on one side so the tip always faces the card.")]
+        [SerializeField, Range(0f, 45f)]
+        private float _wandTiltAngle = 12f;
+
+        [Tooltip("Extra tilt added on alternating cards for a bit of variety, so it doesn't look mechanical.")]
+        [SerializeField, Range(0f, 20f)]
+        private float _wandTiltVariation = 4f;
+
         public float RevealScale => _revealScale;
         public int HoldMs => _holdMs;
         public float CardDimAmount => _cardDimAmount;
@@ -94,7 +106,9 @@ namespace Solitaire.Presenters
         {
             "Canvas/Game Info Bar",
             "Canvas/Bottom Bar",
-            "Canvas/Magic Wand Widget"
+            "Canvas/Magic Wand Widget",
+            "Canvas/Settings Button",
+            "Canvas/Customize Button"
         };
 
         private Camera _camera;
@@ -179,19 +193,28 @@ namespace Solitaire.Presenters
             {
                 for (var i = 0; i < targets.Count; i++)
                 {
-                    var t = targets[i];
-                    t.z = 0f;
-                    var tilt = i % 2 == 0 ? 28f : -28f;
+                    var cardPos = targets[i];
+                    cardPos.z = 0f;
+                    // Hover above the card so the wand reaches down onto it from
+                    // the top instead of poking up from underneath.
+                    var hoverPos = cardPos + Vector3.up * _wandTouchYOffset;
+                    // Keep the tilt on the SAME side for every card so the wand's
+                    // tip (the star end) always dips toward the card. Alternating
+                    // the sign flipped the first card so it tapped with the handle
+                    // (bottom) end instead. A tiny variation keeps it from looking
+                    // mechanical without flipping which end touches.
+                    var tilt = -(_wandTiltAngle + (i % 2 == 0 ? 0f : _wandTiltVariation));
 
                     var hop = DOTween.Sequence().SetUpdate(true);
-                    hop.Append(go.transform.DOMove(t, 0.3f).SetEase(Ease.InOutQuad));
+                    hop.Append(go.transform.DOMove(hoverPos, 0.3f).SetEase(Ease.InOutQuad));
                     hop.Join(go.transform.DORotate(new Vector3(0f, 0f, tilt), 0.3f).SetEase(Ease.OutQuad));
-                    hop.Append(go.transform.DOPunchPosition(new Vector3(0f, 0.25f, 0f), 0.18f, 6, 0.6f));
+                    // Dip DOWN to tap the top of the card, then back up.
+                    hop.Append(go.transform.DOPunchPosition(new Vector3(0f, -0.28f, 0f), 0.18f, 6, 0.6f));
                     await hop.AsyncWaitForCompletion();
 
                     // The wand has "landed" on this card - light it up + sparkle.
                     onReachTarget?.Invoke(i);
-                    Sparkle(t);
+                    Sparkle(cardPos);
                     await UniTask.Delay(120);
                 }
             }
